@@ -27,48 +27,23 @@
             margin: 0 !important;
         }
 
-        /* Cascade Selector / Header */
-        .headers-container {
-            background: #2a2a2a !important;
-            border-bottom: 1px solid #3a3a3a !important;
-            position: relative;
-            z-index: 100;
-            display: flex;
-            overflow-x: auto;
-            white-space: nowrap;
-            -webkit-overflow-scrolling: touch;
-        }
-
-        .cascade-tab {
-            padding: 12px 16px;
-            cursor: pointer;
-            border-right: 1px solid #3a3a3a;
-            opacity: 0.6;
-            transition: all 0.2s;
-            font-size: 14px;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }
-
-        .cascade-tab.active {
-            opacity: 1;
-            background: #333;
-            border-bottom: 2px solid #3b82f6;
-        }
-
-        .cascade-tab .status {
-            width: 8px;
-            height: 8px;
+        /* Connection Status */
+        #statusIndicator {
+            position: fixed;
+            top: 12px;
+            right: 12px;
+            width: 10px;
+            height: 10px;
             border-radius: 50%;
-            background: #666;
+            background: #ef4444; /* red for offline */
+            z-index: 2000;
+            box-shadow: 0 0 8px rgba(0,0,0,0.5);
+            transition: all 0.3s;
         }
-
-        .cascade-tab.active-window .status {
+        #statusIndicator.online {
             background: #4ade80;
+            box-shadow: 0 0 12px #4ade80;
         }
-
-        /* Green if optimized/active window */
 
         .chat-container {
             flex: 1;
@@ -77,41 +52,8 @@
         }
 
         .chat-content {
-            padding: 16px;
+            padding: 0;
             min-height: 100%;
-        }
-
-        .input-section {
-            background: #2a2a2a !important;
-            padding: 12px;
-            /* Account for mobile safe areas */
-            padding-bottom: calc(12px + env(safe-area-inset-bottom));
-            border-top: 1px solid #3a3a3a !important;
-            position: relative;
-            z-index: 1000;
-            /* Increased z-index */
-            display: flex;
-            gap: 8px;
-        }
-
-        textarea {
-            flex: 1;
-            background: #1a1a1a;
-            border: 1px solid #3a3a3a;
-            color: white;
-            padding: 8px;
-            border-radius: 6px;
-            resize: none;
-            height: 40px;
-        }
-
-        button {
-            padding: 0 20px;
-            background: #3b82f6;
-            border: none;
-            color: white;
-            border-radius: 6px;
-            font-weight: 600;
         }
 
         .loading {
@@ -127,10 +69,7 @@
 
 <body>
 
-    <div class="headers-container" id="tabsContainer">
-        <!-- Tabs injected here -->
-        <div class="cascade-tab">Loading...</div>
-    </div>
+    <div id="statusIndicator"></div>
 
     <div class="chat-container" id="chatContainer">
         <div class="chat-content" id="chatContent">
@@ -138,20 +77,21 @@
         </div>
     </div>
 
-    <div class="input-section">
-        <textarea id="messageInput" placeholder="Type a message..."></textarea>
-        <button id="sendBtn">Send</button>
-    </div>
-
     <script>
-        const tabsContainer = document.getElementById('tabsContainer');
+
         const chatContent = document.getElementById('chatContent');
         const chatContainer = document.getElementById('chatContainer');
+        const PANEL_SELECTOR = '.antigravity-agent-side-panel';
 
-        let cascades = [];
-        let currentCascadeId = null;
-        let ws = null;
+        let cascades = []; // Array of active chat sessions
+        let currentCascadeId = null; // Currently selected session ID
+        let lastCascadeIdForScroll = null; // Track session change for initial scroll
+        let ws = null; // WebSocket connection to the monitor server
 
+        /**
+         * Establishes a WebSocket connection for real-time updates.
+         * Handles session list updates and snapshot change notifications.
+         */
         function connect() {
             ws = new WebSocket(`ws://${location.host}`);
 
@@ -160,11 +100,17 @@
 
                 if (data.type === 'cascade_list') {
                     cascades = data.cascades;
-                    renderTabs();
-
-                    // Auto-select first if none selected
-                    if (!currentCascadeId && cascades.length > 0) {
-                        selectCascade(cascades[0].id);
+                    
+                    const indicator = document.getElementById('statusIndicator');
+                    if (cascades.length > 0) {
+                        indicator.classList.add('online');
+                        // Auto-select if none or if current is gone
+                        const stillExists = cascades.find(c => c.id === currentCascadeId);
+                        if (!currentCascadeId || !stillExists) {
+                            selectCascade(cascades[0].id);
+                        }
+                    } else {
+                        indicator.classList.remove('online');
                     }
                 }
 
@@ -178,26 +124,103 @@
             ws.onclose = () => setTimeout(connect, 2000);
         }
 
-        function renderTabs() {
-            tabsContainer.innerHTML = cascades.map(c => `
-                <div class="cascade-tab ${c.id === currentCascadeId ? 'active' : ''} ${c.active ? 'active-window' : ''}" 
-                     onclick="selectCascade('${c.id}')">
-                    <div class="status"></div>
-                    ${c.title || 'Untitled'}
-                </div>
-            `).join('');
-
-            if (cascades.length === 0) {
-                tabsContainer.innerHTML = '<div class="cascade-tab">No chats found</div>';
+        let isInputFocused = false;
+        let lastInputTime = 0;
+        let typingRefreshTimeout = null;
+        chatContent.addEventListener('focusin', (e) => {
+            if (e.target.hasAttribute('contenteditable')) isInputFocused = true;
+        });
+        chatContent.addEventListener('focusout', (e) => {
+            if (e.target.hasAttribute('contenteditable')) isInputFocused = false;
+        });
+        chatContent.addEventListener('keydown', (e) => {
+            if (e.target.hasAttribute('contenteditable') && e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                const text = e.target.innerText || e.target.textContent;
+                sendMessage(text);
+                e.target.blur();
+                isInputFocused = false;
+            } else if (e.target.hasAttribute('contenteditable') && currentCascadeId) {
+                lastInputTime = Date.now();
+                // Proxy individual keystrokes for real-time typing
+                fetch(`/type/${currentCascadeId}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ key: e.key, code: e.code, shiftKey: e.shiftKey, ctrlKey: e.ctrlKey })
+                }).catch(() => {});
+                // Schedule a refresh after typing pauses
+                clearTimeout(typingRefreshTimeout);
+                typingRefreshTimeout = setTimeout(() => {
+                    isInputFocused = false;
+                    updateContentOnly(currentCascadeId);
+                }, 1500);
             }
+        });
+
+        chatContent.addEventListener('click', async (e) => {
+            // Walk up from the click target to find the nearest element with cursor:pointer
+            let interactive = e.target;
+            while (interactive && interactive !== chatContent) {
+                if (window.getComputedStyle(interactive).cursor === 'pointer') break;
+                interactive = interactive.parentElement;
+            }
+            if (interactive && interactive !== chatContent && currentCascadeId) {
+                const path = getUniquePath(interactive);
+                if (path) {
+                    console.log("Clicking:", path);
+                    try {
+                        const res = await fetch(`/click/${currentCascadeId}`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ path })
+                        });
+                        const result = await res.json();
+                        console.log("Click result:", result);
+                        // Trigger an immediate refresh after click
+                        setTimeout(() => updateContentOnly(currentCascadeId), 500);
+                    } catch (err) { console.error(err); }
+                }
+            }
+        });
+
+        function getUniquePath(el) {
+            let path = [];
+            let current = el;
+            let targetSelector = null;
+            while (current && current !== chatContent) {
+                if (current.hasAttribute('data-target-selector')) {
+                    targetSelector = current.getAttribute('data-target-selector');
+                    break;
+                }
+                let tag = current.nodeName.toLowerCase();
+                let siblings = Array.from(current.parentNode.children).filter(c => c.nodeName.toLowerCase() === tag);
+                let index = siblings.indexOf(current) + 1;
+                path.unshift(`${tag}:nth-of-type(${index})`);
+                current = current.parentNode;
+            }
+            
+            if (targetSelector) {
+                const fullPath = path.length > 0 ? `${targetSelector} > ${path.join(' > ')}` : targetSelector;
+                console.log("Resolved Target Path:", fullPath);
+                return fullPath;
+            }
+            return null;
         }
 
+        /**
+         * Selects a specific cascade session and triggers style/content loading.
+         * @param {string} id - The session ID to select.
+         */
         function selectCascade(id) {
             currentCascadeId = id;
-            renderTabs();
             loadCascade(id);
         }
 
+        /**
+         * Loads initial styles and content for a selected cascade.
+         * Styles are fetched once per session selection to minimize data transfer.
+         * @param {string} id - The session ID to load.
+         */
         async function loadCascade(id) {
             try {
                 // 1. Fetch Styles (Once)
@@ -206,11 +229,54 @@
                     const styleData = await styleRes.json();
                     document.getElementById('cascade-style').textContent = `
                         ${styleData.css}
-                        #cascade { 
+                        .antigravity-agent-side-panel, #cascade { 
+                            position: relative !important;
+                            width: 100% !important;
+                            max-width: 100vw !important;
+                            height: auto !important;
+                            min-height: 100% !important;
+                            display: flex !important;
+                            flex-direction: column !important;
                             background: transparent !important; 
-                            color: white !important; 
+                            color: white !important;
+                            margin: 0 !important;
+                            padding: 0 !important;
+                            left: 0 !important;
+                            right: auto !important;
+                            transform: none !important;
+                            overflow: visible !important;
                         }
-                        #cascade .prose {
+
+                        /* Ensure sticky works for any nested header */
+                        .antigravity-agent-side-panel div { overflow: visible !important; }
+                        
+                        /* Sticky Header Logic */
+                        .antigravity-agent-side-panel header,
+                        .antigravity-agent-side-panel [class*="header"], 
+                        .antigravity-agent-side-panel [class*="title-bar"],
+                        .antigravity-agent-side-panel [class*="composite-bar"] {
+                            position: sticky !important;
+                            top: 0 !important;
+                            z-index: 1000 !important;
+                            background: #1a1a1a !important;
+                        }
+
+                        /* Modal/Dialog Support */
+                        [role="dialog"], .monaco-dialog-box, .overlay {
+                            position: fixed !important;
+                            top: 50% !important;
+                            left: 50% !important;
+                            transform: translate(-50%, -50%) !important;
+                            z-index: 2000 !important;
+                            background: #1e1e1e !important;
+                            border: 1px solid #333 !important;
+                            box-shadow: 0 8px 32px rgba(0,0,0,0.5) !important;
+                            max-width: 90vw !important;
+                            max-height: 80vh !important;
+                            overflow: auto !important;
+                        }
+
+                        .antigravity-agent-side-panel .prose, #cascade .prose {
                             --tw-prose-body: #e5e7eb !important;
                             --tw-prose-headings: #f3f4f6 !important;
                             --tw-prose-lead: #e5e7eb !important;
@@ -227,7 +293,7 @@
                             --tw-prose-pre-bg: #1f2937 !important;
                             --tw-prose-th-borders: #374151 !important;
                             --tw-prose-td-borders: #374151 !important;
-                            color: #e5e7eb !important; /* Force color explicitly too */
+                            color: #e5e7eb !important;
                         }
                         /* Ensure code blocks are readable */
                         pre, code { background: #111 !important; color: #ddd !important; }
@@ -239,30 +305,114 @@
             } catch (e) { console.error(e); }
         }
 
+        /**
+         * Fetches and updates the HTML snapshot for the specified session.
+         * Preserves scroll position if the user is already at the bottom.
+         * @param {string} id - The session ID to update.
+         */
         async function updateContentOnly(id) {
+            // Save state of focused element if it's a contenteditable
+            const active = document.activeElement;
+            const wasEditableFocus = active && active.hasAttribute('contenteditable');
+            let savedPath = null;
+            let savedSelection = null;
+
+            if (wasEditableFocus) {
+                savedPath = getUniquePath(active);
+                // Simple selection backup (character offset based)
+                const selection = window.getSelection();
+                if (selection.rangeCount > 0) {
+                    const range = selection.getRangeAt(0);
+                    const preRange = range.cloneRange();
+                    preRange.selectNodeContents(active);
+                    preRange.setEnd(range.startContainer, range.startOffset);
+                    savedSelection = preRange.toString().length;
+                }
+                
+                // Only skip the update if it's VERY recent typing to avoid race conditions
+                if (Date.now() - lastInputTime < 500) return;
+            }
+
             try {
                 const res = await fetch(`/snapshot/${id}`);
-                if (!res.ok) throw new Error('Failed');
+                if (!res.ok) {
+                    console.error("Failed to fetch snapshot", res.status);
+                    return;
+                }
                 const data = await res.json();
+                
+                if (data.error) {
+                    console.error("Snapshot error:", data.error);
+                    chatContent.innerHTML = `<div class="loading">Error: ${data.error}</div>`;
+                    return;
+                }
+
+                if (!data.html) {
+                    console.error("Snapshot returned empty HTML");
+                    return;
+                }
 
                 // Preserve Scroll
                 const isAtBottom = chatContainer.scrollHeight - chatContainer.scrollTop - chatContainer.clientHeight < 50;
+                const isInitialLoad = currentCascadeId !== lastCascadeIdForScroll;
 
                 document.body.style.backgroundColor = data.bodyBg || '#1a1a1a';
                 chatContent.innerHTML = data.html;
-                // No inner style block needed anymore
 
-                if (isAtBottom) chatContainer.scrollTop = chatContainer.scrollHeight;
-            } catch (e) { }
+                // Restore Focus and Selection
+                if (wasEditableFocus && savedPath) {
+                    const el = Array.from(chatContent.querySelectorAll('*')).find(e => getUniquePath(e) === savedPath);
+                    if (el) {
+                        el.focus();
+                        if (savedSelection !== null) {
+                            try {
+                                const selection = window.getSelection();
+                                const range = document.createRange();
+                                // This is a simplified restorer; it works best for text-only contenteditables
+                                let charCount = 0;
+                                let nodeToSet = el;
+                                let offsetToSet = 0;
+                                
+                                function traverse(node) {
+                                    if (node.nodeType === Node.TEXT_NODE) {
+                                        if (charCount + node.length >= savedSelection) {
+                                            nodeToSet = node;
+                                            offsetToSet = savedSelection - charCount;
+                                            return true;
+                                        }
+                                        charCount += node.length;
+                                    } else {
+                                        for (let child of node.childNodes) {
+                                            if (traverse(child)) return true;
+                                        }
+                                    }
+                                    return false;
+                                }
+                                traverse(el);
+                                range.setStart(nodeToSet, offsetToSet);
+                                range.collapse(true);
+                                selection.removeAllRanges();
+                                selection.addRange(range);
+                            } catch (e) { console.warn("Failed to restore cursor", e); }
+                        }
+                    }
+                }
+
+                if (isAtBottom || isInitialLoad) {
+                    chatContainer.scrollTop = chatContainer.scrollHeight;
+                    if (isInitialLoad) lastCascadeIdForScroll = currentCascadeId;
+                }
+            } catch (e) {
+                console.error("Snapshot fetch failed:", e);
+            }
         }
 
-        async function sendMessage() {
-            const input = document.getElementById('messageInput');
-            const text = input.value;
+        /**
+         * Sends a message from the mobile interface to the server.
+         * The server then injects this message into the Antigravity instance.
+         */
+        async function sendMessage(text) {
             if (!text || !currentCascadeId) return;
-
-            // Clear immediately to feel responsive
-            input.value = '';
 
             try {
                 await fetch(`/send/${currentCascadeId}`, {
@@ -273,19 +423,9 @@
                 updateContentOnly(currentCascadeId); // Immediate refresh try
             } catch (e) {
                 console.error("Send failed", e);
-                input.value = text; // Restore on fail
                 alert("Failed to send message: " + e.message);
             }
         }
-
-        document.getElementById('sendBtn').onclick = sendMessage;
-
-        document.getElementById('messageInput').addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                sendMessage();
-            }
-        });
 
         connect();
     </script>
